@@ -127,89 +127,91 @@ void ROIAlignForward(
   int n_rois = nthreads / channels / pooled_width / pooled_height;
   // (n, c, ph, pw) is an element in the pooled output
   // can be parallelized using omp
-  // #pragma omp parallel for num_threads(32)
-  for (int n = 0; n < n_rois; n++) {
-    int index_n = n * channels * pooled_width * pooled_height;
+  int grain_size = ceil(n_rois / at::get_num_threads());
+  at::parallel_for(0, n_rois, grain_size, [&](int64_t start, int64_t end) {
+    for (int n = start; n < end; n++) {
+      int index_n = n * channels * pooled_width * pooled_height;
 
-    const T* offset_rois = rois + n * 5;
-    int roi_batch_ind = offset_rois[0];
+      const T* offset_rois = rois + n * 5;
+      int roi_batch_ind = offset_rois[0];
 
-    // Do not using rounding; this implementation detail is critical
-    T offset = aligned ? (T)0.5 : (T)0.0;
-    T roi_start_w = offset_rois[1] * spatial_scale - offset;
-    T roi_start_h = offset_rois[2] * spatial_scale - offset;
-    T roi_end_w = offset_rois[3] * spatial_scale - offset;
-    T roi_end_h = offset_rois[4] * spatial_scale - offset;
+      // Do not using rounding; this implementation detail is critical
+      T offset = aligned ? (T)0.5 : (T)0.0;
+      T roi_start_w = offset_rois[1] * spatial_scale - offset;
+      T roi_start_h = offset_rois[2] * spatial_scale - offset;
+      T roi_end_w = offset_rois[3] * spatial_scale - offset;
+      T roi_end_h = offset_rois[4] * spatial_scale - offset;
 
-    T roi_width = roi_end_w - roi_start_w;
-    T roi_height = roi_end_h - roi_start_h;
-    if (!aligned) {
-      // Force malformed ROIs to be 1x1
-      roi_width = std::max(roi_width, (T)1.);
-      roi_height = std::max(roi_height, (T)1.);
-    }
+      T roi_width = roi_end_w - roi_start_w;
+      T roi_height = roi_end_h - roi_start_h;
+      if (!aligned) {
+        // Force malformed ROIs to be 1x1
+        roi_width = std::max(roi_width, (T)1.);
+        roi_height = std::max(roi_height, (T)1.);
+      }
 
-    T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
-    T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
+      T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
+      T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
 
-    // We use roi_bin_grid to sample the grid and mimic integral
-    int roi_bin_grid_h = (sampling_ratio > 0)
-        ? sampling_ratio
-        : ceil(roi_height / pooled_height); // e.g., = 2
-    int roi_bin_grid_w =
-        (sampling_ratio > 0) ? sampling_ratio : ceil(roi_width / pooled_width);
+      // We use roi_bin_grid to sample the grid and mimic integral
+      int roi_bin_grid_h = (sampling_ratio > 0)
+          ? sampling_ratio
+          : ceil(roi_height / pooled_height); // e.g., = 2
+      int roi_bin_grid_w =
+          (sampling_ratio > 0) ? sampling_ratio : ceil(roi_width / pooled_width);
 
-    // We do average (integral) pooling inside a bin
-    // When the grid is empty, output zeros.
-    const T count = std::max(roi_bin_grid_h * roi_bin_grid_w, 1); // e.g. = 4
+      // We do average (integral) pooling inside a bin
+      // When the grid is empty, output zeros.
+      const T count = std::max(roi_bin_grid_h * roi_bin_grid_w, 1); // e.g. = 4
 
-    // we want to precalculate indeces and weights shared by all chanels,
-    // this is the key point of optimiation
-    std::vector<PreCalc<T>> pre_calc(
-        roi_bin_grid_h * roi_bin_grid_w * pooled_width * pooled_height);
-    pre_calc_for_bilinear_interpolate(
-        height,
-        width,
-        pooled_height,
-        pooled_width,
-        roi_bin_grid_h,
-        roi_bin_grid_w,
-        roi_start_h,
-        roi_start_w,
-        bin_size_h,
-        bin_size_w,
-        roi_bin_grid_h,
-        roi_bin_grid_w,
-        pre_calc);
+      // we want to precalculate indeces and weights shared by all chanels,
+      // this is the key point of optimiation
+      std::vector<PreCalc<T>> pre_calc(
+          roi_bin_grid_h * roi_bin_grid_w * pooled_width * pooled_height);
+      pre_calc_for_bilinear_interpolate(
+          height,
+          width,
+          pooled_height,
+          pooled_width,
+          roi_bin_grid_h,
+          roi_bin_grid_w,
+          roi_start_h,
+          roi_start_w,
+          bin_size_h,
+          bin_size_w,
+          roi_bin_grid_h,
+          roi_bin_grid_w,
+          pre_calc);
 
-    for (int c = 0; c < channels; c++) {
-      int index_n_c = index_n + c * pooled_width * pooled_height;
-      const T* offset_input =
-          input + (roi_batch_ind * channels + c) * height * width;
-      int pre_calc_index = 0;
+      for (int c = 0; c < channels; c++) {
+        int index_n_c = index_n + c * pooled_width * pooled_height;
+        const T* offset_input =
+            input + (roi_batch_ind * channels + c) * height * width;
+        int pre_calc_index = 0;
 
-      for (int ph = 0; ph < pooled_height; ph++) {
-        for (int pw = 0; pw < pooled_width; pw++) {
-          int index = index_n_c + ph * pooled_width + pw;
+        for (int ph = 0; ph < pooled_height; ph++) {
+          for (int pw = 0; pw < pooled_width; pw++) {
+            int index = index_n_c + ph * pooled_width + pw;
 
-          T output_val = 0.;
-          for (int iy = 0; iy < roi_bin_grid_h; iy++) {
-            for (int ix = 0; ix < roi_bin_grid_w; ix++) {
-              PreCalc<T> pc = pre_calc[pre_calc_index];
-              output_val += pc.w1 * offset_input[pc.pos1] +
-                  pc.w2 * offset_input[pc.pos2] +
-                  pc.w3 * offset_input[pc.pos3] + pc.w4 * offset_input[pc.pos4];
+            T output_val = 0.;
+            for (int iy = 0; iy < roi_bin_grid_h; iy++) {
+              for (int ix = 0; ix < roi_bin_grid_w; ix++) {
+                PreCalc<T> pc = pre_calc[pre_calc_index];
+                output_val += pc.w1 * offset_input[pc.pos1] +
+		    pc.w2 * offset_input[pc.pos2] +
+                    pc.w3 * offset_input[pc.pos3] + pc.w4 * offset_input[pc.pos4];
 
-              pre_calc_index += 1;
+                pre_calc_index += 1;
+              }
             }
-          }
-          output_val /= count;
+            output_val /= count;
 
-          output[index] = output_val;
-        } // for pw
-      } // for ph
-    } // for c
-  } // for n
+            output[index] = output_val;
+          } // for pw
+        } // for ph
+      } // for c
+    } // for n
+  });
 }
 
 template <typename T>
@@ -290,100 +292,105 @@ void ROIAlignBackward(
     const int pooled_width,
     const int sampling_ratio,
     const bool aligned,
-    T* grad_input,
+    const int64_t grad_input_size,
+    T* grad_input_buffer,
     const T* rois,
     const int n_stride,
     const int c_stride,
     const int h_stride,
     const int w_stride) {
-  for (int index = 0; index < nthreads; index++) {
-    // (n, c, ph, pw) is an element in the pooled output
-    int pw = index % pooled_width;
-    int ph = (index / pooled_width) % pooled_height;
-    int c = (index / pooled_width / pooled_height) % channels;
-    int n = index / pooled_width / pooled_height / channels;
+  int grain_size = ceil(nthreads / at::get_num_threads());
+  at::parallel_for(0, nthreads, grain_size, [&](int64_t start, int64_t end) {
+    for (int index = start; index < end; index++) {
+      int thread_no = at::get_thread_num();
+      // (n, c, ph, pw) is an element in the pooled output
+      int pw = index % pooled_width;
+      int ph = (index / pooled_width) % pooled_height;
+      int c = (index / pooled_width / pooled_height) % channels;
+      int n = index / pooled_width / pooled_height / channels;
 
-    const T* offset_rois = rois + n * 5;
-    int roi_batch_ind = offset_rois[0];
+      const T* offset_rois = rois + n * 5;
+      int roi_batch_ind = offset_rois[0];
 
-    // Do not using rounding; this implementation detail is critical
-    T offset = aligned ? (T)0.5 : (T)0.0;
-    T roi_start_w = offset_rois[1] * spatial_scale - offset;
-    T roi_start_h = offset_rois[2] * spatial_scale - offset;
-    T roi_end_w = offset_rois[3] * spatial_scale - offset;
-    T roi_end_h = offset_rois[4] * spatial_scale - offset;
+      // Do not using rounding; this implementation detail is critical
+      T offset = aligned ? (T)0.5 : (T)0.0;
+      T roi_start_w = offset_rois[1] * spatial_scale - offset;
+      T roi_start_h = offset_rois[2] * spatial_scale - offset;
+      T roi_end_w = offset_rois[3] * spatial_scale - offset;
+      T roi_end_h = offset_rois[4] * spatial_scale - offset;
 
-    T roi_width = roi_end_w - roi_start_w;
-    T roi_height = roi_end_h - roi_start_h;
-    if (!aligned) {
-      // Force malformed ROIs to be 1x1
-      roi_width = std::max(roi_width, (T)1.);
-      roi_height = std::max(roi_height, (T)1.);
-    }
+      T roi_width = roi_end_w - roi_start_w;
+      T roi_height = roi_end_h - roi_start_h;
+      if (!aligned) {
+	// Force malformed ROIs to be 1x1
+	roi_width = std::max(roi_width, (T)1.);
+	roi_height = std::max(roi_height, (T)1.);
+      }
 
-    T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
-    T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
+      T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
+      T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
 
-    T* offset_grad_input =
-        grad_input + ((roi_batch_ind * channels + c) * height * width);
+      T* offset_grad_input = grad_input_buffer + (thread_no * grad_input_size) +
+        ((roi_batch_ind * channels + c) * height * width);
 
-    int output_offset = n * n_stride + c * c_stride;
-    const T* offset_grad_output = grad_output + output_offset;
-    const T grad_output_this_bin =
-        offset_grad_output[ph * h_stride + pw * w_stride];
+      int output_offset = n * n_stride + c * c_stride;
+      const T* offset_grad_output = grad_output + output_offset;
+      const T grad_output_this_bin =
+          offset_grad_output[ph * h_stride + pw * w_stride];
 
-    // We use roi_bin_grid to sample the grid and mimic integral
-    int roi_bin_grid_h = (sampling_ratio > 0)
-        ? sampling_ratio
-        : ceil(roi_height / pooled_height); // e.g., = 2
-    int roi_bin_grid_w =
-        (sampling_ratio > 0) ? sampling_ratio : ceil(roi_width / pooled_width);
+      // We use roi_bin_grid to sample the grid and mimic integral
+      int roi_bin_grid_h = (sampling_ratio > 0)
+          ? sampling_ratio
+          : ceil(roi_height / pooled_height); // e.g., = 2
+      int roi_bin_grid_w =
+          (sampling_ratio > 0) ? sampling_ratio : ceil(roi_width / pooled_width);
 
-    // We do average (integral) pooling inside a bin
-    const T count = roi_bin_grid_h * roi_bin_grid_w; // e.g. = 4
+      // We do average (integral) pooling inside a bin
+      const T count = roi_bin_grid_h * roi_bin_grid_w; // e.g. = 4
 
-    for (int iy = 0; iy < roi_bin_grid_h; iy++) {
-      const T y = roi_start_h + ph * bin_size_h +
-          static_cast<T>(iy + .5f) * bin_size_h /
-              static_cast<T>(roi_bin_grid_h); // e.g., 0.5, 1.5
-      for (int ix = 0; ix < roi_bin_grid_w; ix++) {
-        const T x = roi_start_w + pw * bin_size_w +
-            static_cast<T>(ix + .5f) * bin_size_w /
-                static_cast<T>(roi_bin_grid_w);
+      for (int iy = 0; iy < roi_bin_grid_h; iy++) {
+	const T y = roi_start_h + ph * bin_size_h +
+            static_cast<T>(iy + .5f) * bin_size_h /
+                static_cast<T>(roi_bin_grid_h); // e.g., 0.5, 1.5
+	for (int ix = 0; ix < roi_bin_grid_w; ix++) {
+	  const T x = roi_start_w + pw * bin_size_w +
+              static_cast<T>(ix + .5f) * bin_size_w /
+                  static_cast<T>(roi_bin_grid_w);
 
-        T w1, w2, w3, w4;
-        int x_low, x_high, y_low, y_high;
+	  T w1, w2, w3, w4;
+	  int x_low, x_high, y_low, y_high;
 
-        bilinear_interpolate_gradient(
-            height,
-            width,
-            y,
-            x,
-            w1,
-            w2,
-            w3,
-            w4,
-            x_low,
-            x_high,
-            y_low,
-            y_high,
-            index);
+	  bilinear_interpolate_gradient(
+              height,
+	      width,
+	      y,
+	      x,
+	      w1,
+	      w2,
+	      w3,
+	      w4,
+	      x_low,
+	      x_high,
+	      y_low,
+	      y_high,
+	      index);
 
-        T g1 = grad_output_this_bin * w1 / count;
-        T g2 = grad_output_this_bin * w2 / count;
-        T g3 = grad_output_this_bin * w3 / count;
-        T g4 = grad_output_this_bin * w4 / count;
+	  T g1 = grad_output_this_bin * w1 / count;
+	  T g2 = grad_output_this_bin * w2 / count;
+	  T g3 = grad_output_this_bin * w3 / count;
+	  T g4 = grad_output_this_bin * w4 / count;
 
-        if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
-          // atomic add is not needed for now since it is single threaded
-          add(offset_grad_input + y_low * width + x_low, static_cast<T>(g1));
-          add(offset_grad_input + y_low * width + x_high, static_cast<T>(g2));
-          add(offset_grad_input + y_high * width + x_low, static_cast<T>(g3));
-          add(offset_grad_input + y_high * width + x_high, static_cast<T>(g4));
-        } // if
-      } // ix
-    } // iy
-  } // for
+	  if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
+	    // atomic add is not needed for now since it is single threaded
+	    add(offset_grad_input + y_low * width + x_low, static_cast<T>(g1));
+	    add(offset_grad_input + y_low * width + x_high, static_cast<T>(g2));
+	    add(offset_grad_input + y_high * width + x_low, static_cast<T>(g3));
+	    add(offset_grad_input + y_high * width + x_high, static_cast<T>(g4));
+	  } // if
+	} // ix
+      } // iy
+    } // for
+  });
 } // ROIAlignBackward
 
 at::Tensor ROIAlign_forward_cpu(
@@ -464,6 +471,9 @@ at::Tensor ROIAlign_backward_cpu(
     return grad_input;
   }
 
+  const int num_threads = at::get_num_threads();
+  at::Tensor grad_input_buffer =
+    at::zeros({num_threads, batch_size, channels, height, width}, grad.options());
   // get stride values to ensure indexing into gradients is correct.
   int n_stride = grad.stride(0);
   int c_stride = grad.stride(1);
@@ -484,12 +494,16 @@ at::Tensor ROIAlign_backward_cpu(
             pooled_width,
             sampling_ratio,
             aligned,
-            grad_input.data_ptr<scalar_t>(),
+	    grad_input.numel(),
+	    grad_input_buffer.data_ptr<scalar_t>(),
             rois_.data_ptr<scalar_t>(),
             n_stride,
             c_stride,
             h_stride,
             w_stride);
       });
+  for (int64_t i = 0; i < num_threads; ++i) {
+    grad_input.add_(grad_input_buffer.select(0, i));
+  }
   return grad_input;
 }
