@@ -14,18 +14,19 @@ at::Tensor nms_cpu_kernel(
   if (dets.numel() == 0)
     return at::empty({0}, dets.options().dtype(at::kLong));
 
-  auto x1_t = dets.select(1, 0).contiguous();
-  auto y1_t = dets.select(1, 1).contiguous();
-  auto x2_t = dets.select(1, 2).contiguous();
-  auto y2_t = dets.select(1, 3).contiguous();
-
-  at::Tensor areas_t = (x2_t - x1_t) * (y2_t - y1_t);
-
   auto order_t = std::get<1>(scores.sort(0, /* descending=*/true));
 
   auto ndets = dets.size(0);
   at::Tensor suppressed_t = at::zeros({ndets}, dets.options().dtype(at::kByte));
   at::Tensor keep_t = at::zeros({ndets}, dets.options().dtype(at::kLong));
+  auto dets_sorted = dets.index_select(0, order_t);
+
+  auto x1_t = dets_sorted.select(1, 0).contiguous();
+  auto y1_t = dets_sorted.select(1, 1).contiguous();
+  auto x2_t = dets_sorted.select(1, 2).contiguous();
+  auto y2_t = dets_sorted.select(1, 3).contiguous();
+
+  at::Tensor areas_t = (x2_t - x1_t) * (y2_t - y1_t);
 
   auto suppressed = suppressed_t.data_ptr<uint8_t>();
   auto keep = keep_t.data_ptr<int64_t>();
@@ -38,19 +39,16 @@ at::Tensor nms_cpu_kernel(
 
   int64_t num_to_keep = 0;
 
-  for (int64_t _i = 0; _i < ndets; _i++) {
-    auto i = order[_i];
+  for (int64_t i = 0; i < ndets; i++) {
     if (suppressed[i] == 1)
       continue;
-    keep[num_to_keep++] = i;
     auto ix1 = x1[i];
     auto iy1 = y1[i];
     auto ix2 = x2[i];
     auto iy2 = y2[i];
     auto iarea = areas[i];
 
-    for (int64_t _j = _i + 1; _j < ndets; _j++) {
-      auto j = order[_j];
+    for (int64_t j = i + 1; j < ndets; j++) {
       if (suppressed[j] == 1)
         continue;
       auto xx1 = std::max(ix1, x1[j]);
@@ -65,6 +63,11 @@ at::Tensor nms_cpu_kernel(
       if (ovr > iou_threshold)
         suppressed[j] = 1;
     }
+  }
+  for (int64_t i = 0; i < ndets; i++) {
+    if (suppressed[i] == 1)
+      continue;
+    keep[num_to_keep++] = order[i];
   }
   return keep_t.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep);
 }
