@@ -1,11 +1,13 @@
 import os
 import io
+import re
 import sys
 from setuptools import setup, find_packages
 from pkg_resources import parse_version, get_distribution, DistributionNotFound
 import subprocess
 import distutils.command.clean
 import distutils.spawn
+from distutils import sysconfig
 import glob
 import shutil
 
@@ -206,7 +208,17 @@ def get_extensions():
         extra_compile_args.setdefault('cxx', [])
         extra_compile_args['cxx'].append('/MP')
 
+    if torch.has_openmp:
+        if sys.platform == 'linux':
+            try:
+                extra_compile_args['cxx'].append('-fopenmp')
+            except KeyError:
+                extra_compile_args = {
+                    'cxx': ['-fopenmp']
+                }
+
     debug_mode = os.getenv('DEBUG', '0') == '1'
+    compiler = sysconfig.get_config_var('CXX')
     if debug_mode:
         print("Compile in debug mode")
         extra_compile_args['cxx'].append("-g")
@@ -219,6 +231,15 @@ def get_extensions():
             ]
             extra_compile_args["nvcc"].append("-O0")
             extra_compile_args["nvcc"].append("-g")
+    elif re.search('^FCC', compiler) or re.search('^.*/FCC', compiler):
+        if 'Nclang' in compiler:
+            print("Compile in Ofast mode")
+            try:
+                extra_compile_args['cxx'].append('-Ofast')
+            except KeyError:
+                extra_compile_args = {
+                    'cxx': ['-Ofast']
+                }
 
     sources = [os.path.join(extensions_dir, s) for s in sources]
 
