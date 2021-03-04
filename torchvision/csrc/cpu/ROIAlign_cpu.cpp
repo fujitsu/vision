@@ -482,7 +482,7 @@ at::Tensor ROIAlign_backward_cpu(
 
   auto rois_ = rois.contiguous();
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      grad.scalar_type(), "ROIAlign_forward", [&] {
+      grad.scalar_type(), "ROIAlign_backward", [&] {
         ROIAlignBackward<scalar_t>(
             grad.numel(),
             grad.data_ptr<scalar_t>(),
