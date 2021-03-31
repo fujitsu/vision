@@ -1,3 +1,7 @@
+This repository provides vision tuned for A64FX.
+
+Please See the `wiki <https://github.com/fujitsu/vision/wiki>`_ for details.
+
 torchvision
 ===========
 
